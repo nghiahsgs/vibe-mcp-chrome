@@ -1,0 +1,45 @@
+{
+  "name": "chrome-profile-mcp",
+  "version": "0.1.0",
+  "description": "MCP server that controls Chrome with a specific user profile via CDP",
+  "type": "module",
+  "main": "./dist/mcp/server.js",
+  "bin": {
+    "chrome-profile-mcp": "./dist/cli.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/cli.ts",
+    "start": "node dist/cli.js",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "mcp",
+    "chrome",
+    "browser",
+    "automation",
+    "ai",
+    "playwright",
+    "cdp"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@inquirer/prompts": "^8.3.0",
+    "@modelcontextprotocol/sdk": "^1.27.1",
+    "commander": "^14.0.3",
+    "playwright": "^1.58.2",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
+  }
+}

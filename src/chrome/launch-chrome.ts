@@ -1,4 +1,7 @@
 import { spawn, execSync, type ChildProcess } from "node:child_process";
+import { mkdtemp, symlink, copyFile, rm } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { createServer } from "node:net";
 import type { Browser } from "playwright";
 import { log } from "../utils/logger.js";
@@ -16,6 +19,8 @@ export interface ChromeInstance {
   process: ChildProcess | null;
   port: number;
   cdpUrl: string;
+  /** Temp dir to clean up on shutdown (if created). */
+  tempDir?: string;
 }
 
 /** Check if any Chrome process is currently running. */
@@ -39,7 +44,6 @@ export async function killChrome(): Promise<void> {
   } catch {
     /* may already be dead */
   }
-  // Wait for Chrome to fully exit
   const start = Date.now();
   while (Date.now() - start < 5000) {
     if (!isChromeRunning()) return;
@@ -48,7 +52,7 @@ export async function killChrome(): Promise<void> {
   log.warn("Chrome processes may still be exiting...");
 }
 
-/** Check if a port is free before launching Chrome. */
+/** Check if a port is free. */
 async function isPortAvailable(port: number): Promise<boolean> {
   return new Promise((resolve) => {
     const server = createServer();
@@ -63,7 +67,7 @@ async function isPortAvailable(port: number): Promise<boolean> {
 /** Poll CDP endpoint until it responds. */
 async function waitForCDP(
   port: number,
-  timeoutMs = 15000
+  timeoutMs = 30000
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
@@ -82,10 +86,7 @@ async function waitForCDP(
   );
 }
 
-/**
- * Try connecting to an already-running CDP endpoint.
- * Returns the websocket URL if successful, null otherwise.
- */
+/** Try connecting to an already-running CDP endpoint. */
 export async function tryExistingCDP(
   port: number
 ): Promise<string | null> {
@@ -101,15 +102,44 @@ export async function tryExistingCDP(
 }
 
 /**
+ * Create a temp user-data-dir with symlinked profile.
+ * Chrome 136+ blocks CDP on the default data dir, so we use a
+ * separate temp dir with the profile symlinked to preserve cookies/sessions.
+ */
+async function createTempUserDataDir(
+  userDataDir: string,
+  profileDirectory: string
+): Promise<string> {
+  const tempDir = await mkdtemp(join(tmpdir(), "chrome-mcp-"));
+  const profileSrc = join(userDataDir, profileDirectory);
+  const profileDst = join(tempDir, profileDirectory);
+
+  await symlink(profileSrc, profileDst);
+
+  // Copy Local State (Chrome needs it for profile metadata)
+  try {
+    await copyFile(
+      join(userDataDir, "Local State"),
+      join(tempDir, "Local State")
+    );
+  } catch {
+    /* optional - Chrome works without it */
+  }
+
+  log.debug(`Temp user-data-dir: ${tempDir}`);
+  return tempDir;
+}
+
+/**
  * Launch Chrome with CDP debugging.
- * Assumes Chrome is NOT already running — caller must handle that.
+ * Uses a temp user-data-dir with symlinked profile (Chrome 136+ requirement).
  */
 export async function launchChrome(
   opts: LaunchOptions
 ): Promise<ChromeInstance> {
   const port = opts.port ?? 9222;
 
-  // Check if CDP already running on this port (reuse)
+  // Reuse existing CDP if available
   const existingCdp = await tryExistingCDP(port);
   if (existingCdp) {
     log.info(`Found existing Chrome CDP on port ${port}, reusing.`);
@@ -124,9 +154,15 @@ export async function launchChrome(
     );
   }
 
+  // Chrome 136+: use temp dir with symlinked profile
+  const tempDir = await createTempUserDataDir(
+    opts.userDataDir,
+    opts.profileDirectory
+  );
+
   const args = [
     `--remote-debugging-port=${port}`,
-    `--user-data-dir=${opts.userDataDir}`,
+    `--user-data-dir=${tempDir}`,
     `--profile-directory=${opts.profileDirectory}`,
     "--no-first-run",
     "--no-default-browser-check",
@@ -144,7 +180,7 @@ export async function launchChrome(
   });
 
   const cdpUrl = await waitForCDP(port);
-  return { process: chromeProcess, port, cdpUrl };
+  return { process: chromeProcess, port, cdpUrl, tempDir };
 }
 
 /** Register process cleanup handlers for graceful shutdown. */
@@ -166,6 +202,14 @@ export function setupCleanup(
       chrome.process?.kill();
     } catch {
       /* process may already be dead */
+    }
+    // Clean up temp dir (only remove the symlink + copied files, not the real profile)
+    if (chrome.tempDir) {
+      try {
+        await rm(chrome.tempDir, { recursive: true });
+      } catch {
+        /* best effort */
+      }
     }
     process.exit(0);
   };

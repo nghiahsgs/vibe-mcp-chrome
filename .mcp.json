@@ -1,0 +1,9 @@
+ {
+    "mcpServers": {
+      "chrome-profile-mcp": {
+        "type": "stdio",
+        "command": "tsx",
+        "args": ["/Users/nguyennghia/Documents/GitHub/vibe-mcp-chrome/src/cli.ts", "--profile", "Profile 4", "-k"]
+      }
+    }
+  }

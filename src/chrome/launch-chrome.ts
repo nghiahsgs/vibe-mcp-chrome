@@ -1,10 +1,23 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, execSync, type ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 import type { Browser } from "playwright";
 import { log } from "../utils/logger.js";
 
 const CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
+
+/** Check if any Chrome process is currently running. */
+function isChromeRunning(): boolean {
+  try {
+    const result = execSync(
+      'pgrep -f "Google Chrome" 2>/dev/null',
+      { encoding: "utf-8" }
+    );
+    return result.trim().length > 0;
+  } catch {
+    return false;
+  }
+}
 
 export interface LaunchOptions {
   userDataDir: string;
@@ -77,6 +90,16 @@ export async function launchChrome(
   if (existingCdp) {
     log.info(`Found existing Chrome CDP on port ${port}, reusing.`);
     return { process: null, port, cdpUrl: existingCdp };
+  }
+
+  // Check if Chrome is already running WITHOUT CDP
+  if (isChromeRunning()) {
+    throw new Error(
+      "Chrome is already running without CDP debugging.\n" +
+        "Please close ALL Chrome windows/processes first, then run this tool again.\n" +
+        "Chrome cannot enable CDP on an already-running instance.\n\n" +
+        'Tip: Run "pkill -f \'Google Chrome\'" to force-close Chrome.'
+    );
   }
 
   // Check port availability

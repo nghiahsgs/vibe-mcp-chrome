@@ -6,7 +6,13 @@ import {
   discoverProfiles,
   getChromeUserDataDir,
 } from "./chrome/discover-profiles.js";
-import { launchChrome, setupCleanup } from "./chrome/launch-chrome.js";
+import {
+  isChromeRunning,
+  killChrome,
+  tryExistingCDP,
+  launchChrome,
+  setupCleanup,
+} from "./chrome/launch-chrome.js";
 import { connectCDP } from "./chrome/connect-cdp.js";
 import { createMcpServer, startServer } from "./mcp/server.js";
 import { log } from "./utils/logger.js";
@@ -57,7 +63,32 @@ async function run(opts: {
     throw new Error(`Invalid port: "${opts.port}". Must be 1-65535.`);
   }
 
-  // 1. Discover profiles
+  // 1. Handle Chrome already running (BEFORE profile selection)
+  const existingCdp = await tryExistingCDP(port);
+  if (!existingCdp && isChromeRunning()) {
+    if (opts.killExisting) {
+      // Flag mode: kill silently
+      await killChrome();
+    } else if (!opts.profile) {
+      // Interactive mode: ask user
+      const shouldKill = await confirm({
+        message:
+          "Chrome is running without CDP. Close it and relaunch with CDP?",
+        default: true,
+      });
+      if (!shouldKill) {
+        throw new Error("Cannot proceed while Chrome is running without CDP.");
+      }
+      await killChrome();
+    } else {
+      // Non-interactive without -k flag: error
+      throw new Error(
+        "Chrome is already running without CDP. Use -k to auto-close it."
+      );
+    }
+  }
+
+  // 2. Discover profiles
   log.info("Discovering Chrome profiles...");
   const profiles = await discoverProfiles();
 
@@ -65,10 +96,9 @@ async function run(opts: {
     throw new Error("No Chrome profiles found. Is Chrome installed?");
   }
 
-  // 2. Select profile
+  // 3. Select profile
   let selectedProfile;
   if (opts.profile) {
-    // Non-interactive: find by directory name
     selectedProfile = profiles.find(
       (p) => p.directoryName === opts.profile
     );
@@ -80,7 +110,6 @@ async function run(opts: {
       );
     }
   } else {
-    // Interactive: show picker
     const choice = await select({
       message: "Select Chrome profile:",
       choices: profiles.map((p) => ({
@@ -95,50 +124,23 @@ async function run(opts: {
 
   log.info(`Selected profile: ${selectedProfile.displayName}`);
 
-  // 3. Launch Chrome with CDP
+  // 4. Launch Chrome with CDP
   log.info(`Launching Chrome with CDP on port ${port}...`);
-
-  const killExisting = opts.killExisting ?? false;
-  let chrome;
-  try {
-    chrome = await launchChrome({
-      userDataDir: getChromeUserDataDir(),
-      profileDirectory: selectedProfile.directoryName,
-      port,
-      killExisting,
-    });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // If Chrome is running and we're in interactive mode, offer to kill it
-    if (msg.includes("already running") && !opts.profile) {
-      const shouldKill = await confirm({
-        message:
-          "Chrome is running without CDP. Close it and relaunch with CDP?",
-        default: true,
-      });
-      if (!shouldKill) {
-        throw new Error("Cannot proceed while Chrome is running without CDP.");
-      }
-      chrome = await launchChrome({
-        userDataDir: getChromeUserDataDir(),
-        profileDirectory: selectedProfile.directoryName,
-        port,
-        killExisting: true,
-      });
-    } else {
-      throw err;
-    }
-  }
+  const chrome = await launchChrome({
+    userDataDir: getChromeUserDataDir(),
+    profileDirectory: selectedProfile.directoryName,
+    port,
+  });
   log.info("Chrome launched successfully.");
 
-  // 4. Connect Playwright via CDP
+  // 5. Connect Playwright via CDP
   log.info("Connecting to Chrome via CDP...");
   const { browser, context, page } = await connectCDP(chrome.cdpUrl);
 
-  // 5. Setup cleanup handlers
+  // 6. Setup cleanup handlers
   setupCleanup(chrome, browser);
 
-  // 6. Create and start MCP server
+  // 7. Create and start MCP server
   log.info("Starting MCP server...");
   const server = await createMcpServer(browser, context, page);
   await startServer(server);

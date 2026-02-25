@@ -6,8 +6,20 @@ import { log } from "../utils/logger.js";
 const CHROME_PATH =
   "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
 
+export interface LaunchOptions {
+  userDataDir: string;
+  profileDirectory: string;
+  port?: number;
+}
+
+export interface ChromeInstance {
+  process: ChildProcess | null;
+  port: number;
+  cdpUrl: string;
+}
+
 /** Check if any Chrome process is currently running. */
-function isChromeRunning(): boolean {
+export function isChromeRunning(): boolean {
   try {
     const result = execSync(
       'pgrep -f "Google Chrome" 2>/dev/null',
@@ -19,27 +31,21 @@ function isChromeRunning(): boolean {
   }
 }
 
-export interface LaunchOptions {
-  userDataDir: string;
-  profileDirectory: string;
-  port?: number;
-  /** If true, kill existing Chrome before launching with CDP. */
-  killExisting?: boolean;
-}
-
-export interface ChromeInstance {
-  process: ChildProcess | null;
-  port: number;
-  cdpUrl: string;
-}
-
-/** Force-kill all Chrome processes. */
-function killChrome(): void {
+/** Force-kill all Chrome processes and wait for them to exit. */
+export async function killChrome(): Promise<void> {
+  log.info("Closing existing Chrome processes...");
   try {
     execSync('pkill -f "Google Chrome"', { stdio: "ignore" });
   } catch {
     /* may already be dead */
   }
+  // Wait for Chrome to fully exit
+  const start = Date.now();
+  while (Date.now() - start < 5000) {
+    if (!isChromeRunning()) return;
+    await new Promise((r) => setTimeout(r, 300));
+  }
+  log.warn("Chrome processes may still be exiting...");
 }
 
 /** Check if a port is free before launching Chrome. */
@@ -63,14 +69,16 @@ async function waitForCDP(
   while (Date.now() - start < timeoutMs) {
     try {
       const res = await fetch(`http://localhost:${port}/json/version`);
-      const data = (await res.json()) as { webSocketDebuggerUrl: string };
+      const data = (await res.json()) as {
+        webSocketDebuggerUrl: string;
+      };
       return data.webSocketDebuggerUrl;
     } catch {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
   throw new Error(
-    `CDP not available on port ${port} after ${timeoutMs}ms. Is Chrome already running? Close it and try again.`
+    `CDP not available on port ${port} after ${timeoutMs}ms.`
   );
 }
 
@@ -78,51 +86,41 @@ async function waitForCDP(
  * Try connecting to an already-running CDP endpoint.
  * Returns the websocket URL if successful, null otherwise.
  */
-async function tryExistingCDP(
+export async function tryExistingCDP(
   port: number
 ): Promise<string | null> {
   try {
     const res = await fetch(`http://localhost:${port}/json/version`);
-    const data = (await res.json()) as { webSocketDebuggerUrl: string };
+    const data = (await res.json()) as {
+      webSocketDebuggerUrl: string;
+    };
     return data.webSocketDebuggerUrl;
   } catch {
     return null;
   }
 }
 
-/** Launch Chrome with CDP debugging on the specified profile. */
+/**
+ * Launch Chrome with CDP debugging.
+ * Assumes Chrome is NOT already running — caller must handle that.
+ */
 export async function launchChrome(
   opts: LaunchOptions
 ): Promise<ChromeInstance> {
   const port = opts.port ?? 9222;
 
-  // Check if CDP already running on this port
+  // Check if CDP already running on this port (reuse)
   const existingCdp = await tryExistingCDP(port);
   if (existingCdp) {
     log.info(`Found existing Chrome CDP on port ${port}, reusing.`);
     return { process: null, port, cdpUrl: existingCdp };
   }
 
-  // Check if Chrome is already running WITHOUT CDP
-  if (isChromeRunning()) {
-    if (opts.killExisting) {
-      log.info("Closing existing Chrome processes...");
-      killChrome();
-      // Wait for Chrome to fully exit
-      await new Promise((r) => setTimeout(r, 2000));
-    } else {
-      throw new Error(
-        "Chrome is already running without CDP debugging.\n" +
-          "Run with --kill-existing to auto-close Chrome, or close it manually."
-      );
-    }
-  }
-
   // Check port availability
   const available = await isPortAvailable(port);
   if (!available) {
     throw new Error(
-      `Port ${port} is in use but no CDP endpoint found. Close the process using it or use --port to pick another.`
+      `Port ${port} is in use. Close the process using it or use --port.`
     );
   }
 
@@ -145,9 +143,7 @@ export async function launchChrome(
     log.error("Chrome launch failed:", err.message);
   });
 
-  // Wait for CDP to become available
   const cdpUrl = await waitForCDP(port);
-
   return { process: chromeProcess, port, cdpUrl };
 }
 

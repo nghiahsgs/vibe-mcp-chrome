@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from "commander";
-import { select } from "@inquirer/prompts";
+import { confirm, select } from "@inquirer/prompts";
 import {
   discoverProfiles,
   getChromeUserDataDir,
@@ -24,6 +24,7 @@ program
     "Profile directory name (skip interactive selection)"
   )
   .option("--port <number>", "CDP port", "9222")
+  .option("-k, --kill-existing", "Auto-close Chrome if already running")
   .option("--debug", "Enable debug logging")
   .action(async (opts) => {
     if (opts.debug) process.env.DEBUG = "1";
@@ -42,6 +43,7 @@ program.parse();
 async function run(opts: {
   profile?: string;
   port: string;
+  killExisting?: boolean;
   debug?: boolean;
 }): Promise<void> {
   // Platform guard
@@ -95,11 +97,38 @@ async function run(opts: {
 
   // 3. Launch Chrome with CDP
   log.info(`Launching Chrome with CDP on port ${port}...`);
-  const chrome = await launchChrome({
-    userDataDir: getChromeUserDataDir(),
-    profileDirectory: selectedProfile.directoryName,
-    port,
-  });
+
+  const killExisting = opts.killExisting ?? false;
+  let chrome;
+  try {
+    chrome = await launchChrome({
+      userDataDir: getChromeUserDataDir(),
+      profileDirectory: selectedProfile.directoryName,
+      port,
+      killExisting,
+    });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // If Chrome is running and we're in interactive mode, offer to kill it
+    if (msg.includes("already running") && !opts.profile) {
+      const shouldKill = await confirm({
+        message:
+          "Chrome is running without CDP. Close it and relaunch with CDP?",
+        default: true,
+      });
+      if (!shouldKill) {
+        throw new Error("Cannot proceed while Chrome is running without CDP.");
+      }
+      chrome = await launchChrome({
+        userDataDir: getChromeUserDataDir(),
+        profileDirectory: selectedProfile.directoryName,
+        port,
+        killExisting: true,
+      });
+    } else {
+      throw err;
+    }
+  }
   log.info("Chrome launched successfully.");
 
   // 4. Connect Playwright via CDP

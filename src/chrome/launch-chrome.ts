@@ -23,12 +23,23 @@ export interface LaunchOptions {
   userDataDir: string;
   profileDirectory: string;
   port?: number;
+  /** If true, kill existing Chrome before launching with CDP. */
+  killExisting?: boolean;
 }
 
 export interface ChromeInstance {
   process: ChildProcess | null;
   port: number;
   cdpUrl: string;
+}
+
+/** Force-kill all Chrome processes. */
+function killChrome(): void {
+  try {
+    execSync('pkill -f "Google Chrome"', { stdio: "ignore" });
+  } catch {
+    /* may already be dead */
+  }
 }
 
 /** Check if a port is free before launching Chrome. */
@@ -94,12 +105,17 @@ export async function launchChrome(
 
   // Check if Chrome is already running WITHOUT CDP
   if (isChromeRunning()) {
-    throw new Error(
-      "Chrome is already running without CDP debugging.\n" +
-        "Please close ALL Chrome windows/processes first, then run this tool again.\n" +
-        "Chrome cannot enable CDP on an already-running instance.\n\n" +
-        'Tip: Run "pkill -f \'Google Chrome\'" to force-close Chrome.'
-    );
+    if (opts.killExisting) {
+      log.info("Closing existing Chrome processes...");
+      killChrome();
+      // Wait for Chrome to fully exit
+      await new Promise((r) => setTimeout(r, 2000));
+    } else {
+      throw new Error(
+        "Chrome is already running without CDP debugging.\n" +
+          "Run with --kill-existing to auto-close Chrome, or close it manually."
+      );
+    }
   }
 
   // Check port availability
